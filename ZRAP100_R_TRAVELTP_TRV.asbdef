@@ -1,0 +1,120 @@
+managed implementation in class ZRAP100_BP_TRAVELTP_TRV unique;
+strict ( 2 );
+with draft;
+extensible;
+define behavior for ZRAP100_R_TRAVELTP_TRV alias Travel
+persistent table zrap100_atravtrv
+extensible
+draft table zrap100_dtravtrv
+etag master LocalLastChangedAt
+lock master total etag LastChangedAt
+authorization master ( global )
+early numbering
+{
+
+  side effects
+  {
+    field BookingFee affects field TotalPrice;
+    field CurrencyCode affects field TotalPrice;
+  }
+
+  field ( readonly )
+  CreatedBy,
+  CreatedAt,
+  LocalLastChangedBy,
+  LocalLastChangedAt,
+  TotalPrice,
+  LastChangedAt;
+
+
+  field ( readonly )
+  TravelID;
+
+  field ( mandatory )
+  CustomerID,
+  BeginDate,
+  EndDate;
+
+  create;
+  update ( features : instance );
+  delete ( features : instance );
+
+  association _Booking { create; with draft; }
+
+  determination setStatusToOpen on modify { create; }
+  determination calculateTotalPrice on modify { field BookingFee, CurrencyCode; }
+  validation validateCustomer on save { create; field CustomerID; }
+  validation validateDates on save { create; field BeginDate, EndDate; }
+  determination initData on modify { create; }
+
+  action ( features : instance ) deductDiscount parameter ZRAP100_A_DISCOUNT_TRV result [1] $self;
+  //  action ( features : instance ) vat result [1] $self;
+  action ( features : instance ) acceptTravel result [1] $self;
+  action ( features : instance ) rejectTravel result [1] $self;
+  factory action copyTravel [1];
+
+
+  draft action Activate optimized;
+  draft action Discard;
+  draft action ( features : instance ) Edit;
+  draft action Resume;
+  draft determine action Prepare
+  {
+    validation validateCustomer;
+    validation validateDates; }
+
+  mapping for zrap100_atravtrv corresponding extensible
+    {
+      TravelID           = travel_id;
+      AgencyID           = agency_id;
+      CustomerID         = customer_id;
+      BeginDate          = begin_date;
+      EndDate            = end_date;
+      BookingFee         = booking_fee;
+      TotalPrice         = total_price;
+      CurrencyCode       = currency_code;
+      Description        = description;
+      OverallStatus      = overall_status;
+      Attachment         = attachment;
+      MimeType           = mime_type;
+      FileName           = file_name;
+      CreatedBy          = created_by;
+      CreatedAt          = created_at;
+      LocalLastChangedBy = local_last_changed_by;
+      LocalLastChangedAt = local_last_changed_at;
+      LastChangedAt      = last_changed_at;
+    }
+
+}
+define behavior for ZRAP_R_BOOKING_TRV alias Booking
+persistent table zrap_abook_trv
+draft table zrap100_dbooktrv
+lock dependent by _Travel
+authorization dependent by _Travel
+etag master LocalLastChangedAt
+{
+  update;
+  delete;
+
+  // บอกว่าฟิลด์ไหนห้ามแก้ (ID ควรอ่านอย่างเดียว)
+  field ( readonly ) TravelID, BookingID;
+
+  // เชื่อมกลับไปหาแม่ (รองรับ Draft)
+  association _Travel { with draft; }
+
+  // จับคู่ชื่อฟิลด์ใน CDS กับ Database Table
+  mapping for zrap_abook_trv
+  {
+    TravelID           = travel_id;
+    BookingID          = booking_id;
+    BookingDate        = booking_date;
+    CustomerID         = customer_id;
+    CarrierID          = carrier_id;
+    ConnectionID       = connection_id;
+    FlightDate         = flight_date;
+//    FlightPrice        = flight_price;
+    CurrencyCode       = currency_code;
+    BookingStatus      = booking_status;
+    LocalLastChangedAt = local_last_changed_at;
+  }
+}
