@@ -1,0 +1,87 @@
+@Metadata.layer: #CUSTOMER
+@UI: {
+  headerInfo: {
+    typeName: 'Travel',
+    typeNamePlural: 'บันทึกรายงานการเดินทางของพนักงาน',
+    imageUrl: 'Attachment',  //case-sensitive
+    description: { type: #STANDARD, value: 'TravelID' } //case-sensitive
+  }
+}
+annotate view ZRAP100_C_TRAVEL_MGR with
+{
+  @UI.facet: [ {
+    id: 'idIdentification',
+    type: #IDENTIFICATION_REFERENCE,
+    label: 'Travel',
+    position: 10
+  } ]
+
+  @UI: {
+        lineItem:       [ { position: 10, importance: #HIGH,label: 'เลขที่เอกสาร' } ],
+        identification: [ { position: 10,label: 'เลขที่เอกสาร'  } ],
+        selectionField: [ { position: 10 } ]
+  }
+  TravelID;
+
+  @UI: {
+         lineItem:       [ { position: 20, importance: #HIGH, label: 'หน่วยงาน' } ],
+         identification: [ { position: 20 , label: 'หน่วยงาน'} ],
+         selectionField: [ { position: 20 } ]
+   }
+  AgencyID;
+
+  @UI: {
+         lineItem:       [ { position: 30, importance: #HIGH, label: 'ชื่อพนักงาน' } ],
+         identification: [ { position: 30,label: 'ชื่อพนักงาน'  } ],
+         selectionField: [ { position: 30 } ]
+   }
+  CustomerID;
+
+  @UI: {
+        lineItem:       [ { position: 40, importance: #MEDIUM,label: 'วันที่เริ่ม' } ],
+        identification: [ { position: 40,label: 'วันที่เริ่ม' } ]
+  }
+  BeginDate;
+
+  @UI: {
+        lineItem:       [ { position: 50, importance: #MEDIUM ,label: 'ถึงวันที่'} ],
+        identification: [ { position: 50 ,label: 'ถึงวันที่'} ]
+  }
+  EndDate;
+
+  @UI.identification: [ { position: 60 ,label: 'ค่าใช้จ่าย'} ]
+  BookingFee;
+
+  @UI.identification: [ { position: 70, importance: #MEDIUM,label: 'ราคารวมVAT7%'} ]
+  TotalPrice;
+
+  @UI.identification: [ { position: 90,label: 'คำอธิบาย' } ]
+  Description;
+  @UI: {
+    lineItem:      [ { position: 90, importance: #HIGH,label: 'สถานะ', criticality: 'OverallStatusColor' }
+                      ,{ type: #FOR_ACTION, dataAction: 'copyTravel', label: 'ทำซ้ำ' }
+                      ,{ type: #FOR_ACTION, dataAction: 'acceptTravel', label: 'อนุญาติ' }
+                      ,{ type: #FOR_ACTION, dataAction: 'rejectTravel', label: 'ยกเลิก' }
+         ],
+ identification: [ { position: 90,label: 'สถานะ', criticality: 'OverallStatusColor' }
+                     ,{ type: #FOR_ACTION, dataAction: 'deductDiscount', label: 'ส่วนลด' }
+//                     ,{ type: #FOR_ACTION, dataAction: 'vat', label: ' VAT7%' }
+                     ,{ type: #FOR_ACTION, dataAction: 'acceptTravel', label: 'อนุญาติ' }
+                     ,{ type: #FOR_ACTION, dataAction: 'rejectTravel', label: 'ยกเลิก' }
+         ],
+      textArrangement: #TEXT_ONLY
+    }
+  OverallStatus;
+
+  @UI.identification: [ { position: 110 ,label :'ใบเสร้จรับเงิน'} ]
+  Attachment;
+
+  @UI.hidden: true
+  MimeType;
+
+  @UI.hidden: true
+  FileName;
+
+  @UI.hidden: true
+  LocalLastChangedAt;
+}
