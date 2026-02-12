@@ -1,0 +1,684 @@
+CLASS lhc_zrap100_r_traveltp_trv DEFINITION INHERITING FROM cl_abap_behavior_handler.
+  PRIVATE SECTION.
+
+    CONSTANTS:
+      BEGIN OF travel_status,
+        Open     TYPE c LENGTH 1 VALUE 'O', "Open
+        Accepted TYPE c LENGTH 1 VALUE 'A', "Accepted
+        rejected TYPE c LENGTH 1 VALUE 'X', "Rejected
+      END OF travel_status.
+
+    METHODS:
+      get_global_authorizations FOR GLOBAL AUTHORIZATION
+        IMPORTING
+        REQUEST requested_authorizations FOR Travel
+        RESULT result,
+      earlynumbering_create FOR NUMBERING
+        IMPORTING entities FOR CREATE Travel,
+      setStatusToOpen FOR DETERMINE ON MODIFY
+        IMPORTING keys FOR Travel~setStatusToOpen,
+      validateCustomer FOR VALIDATE ON SAVE
+        IMPORTING keys FOR Travel~validateCustomer.
+
+    METHODS validateDates FOR VALIDATE ON SAVE
+      IMPORTING keys FOR Travel~validateDates.
+    METHODS deductDiscount FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~deductDiscount RESULT result.
+*    METHODS vat FOR MODIFY
+*      IMPORTING keys FOR ACTION Travel~vat RESULT result.
+    METHODS copyTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~copyTravel.
+    METHODS acceptTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~acceptTravel RESULT result.
+
+    METHODS rejectTravel FOR MODIFY
+      IMPORTING keys FOR ACTION Travel~rejectTravel RESULT result.
+    METHODS get_instance_features FOR INSTANCE FEATURES
+      IMPORTING keys REQUEST requested_features FOR Travel RESULT result.
+    METHODS calculatetotalprice FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR travel~calculatetotalprice.
+    METHODS initdata FOR DETERMINE ON MODIFY
+      IMPORTING keys FOR travel~initdata.
+ENDCLASS.
+
+CLASS lhc_zrap100_r_traveltp_trv IMPLEMENTATION.
+  METHOD get_global_authorizations.
+
+    " --- ส่วนจำลอง Role (แก้ตรงนี้เพื่อเปลี่ยนบทบาทตอนเทส) ---ฆ
+  DATA(is_manager)  = abap_false. " ถ้าเป็น abap_true คือหัวหน้า / abap_false คือพนักงาน
+*   DATA(is_manager)  = abap_true.
+    " ----------------------------------------------------
+
+*    DATA(is_manager) = abap_false.
+*
+*    " ตรวจสอบว่า User ที่ Login เข้ามา (sy-uname) คือหัวหน้าหรือไม่?
+*    " ในระบบจริงมักจะเช็คผ่าน Authority Object (AUTHORITY-CHECK)
+*    IF sy-uname = 'USER_MGR' OR sy-uname = 'CB9980000000'. " <-- ใส่ ID ของหัวหน้า
+*       is_manager = abap_true.
+*    ENDIF.
+*
+*    " ... (โค้ดเช็คสิทธิ์ create/update ส่วนที่เหลือเหมือนเดิม) ...
+
+
+    IF requested_authorizations-%create EQ if_abap_behv=>mk-on.
+      IF is_manager = abap_true.
+        " หัวหน้า: ห้ามสร้าง (Create)
+        result-%create = if_abap_behv=>auth-unauthorized.
+      ELSE.
+        " พนักงาน: สร้างได้
+        result-%create = if_abap_behv=>auth-allowed.
+      ENDIF.
+    ENDIF.
+
+    IF requested_authorizations-%update EQ if_abap_behv=>mk-on OR
+       requested_authorizations-%action-Edit EQ if_abap_behv=>mk-on.
+      IF is_manager = abap_true.
+        " หัวหน้า: ห้ามแก้ไข (Edit)
+        result-%update      = if_abap_behv=>auth-unauthorized.
+        result-%action-Edit = if_abap_behv=>auth-unauthorized.
+      ELSE.
+        " พนักงาน: แก้ไขได้
+        result-%update      = if_abap_behv=>auth-allowed.
+        result-%action-Edit = if_abap_behv=>auth-allowed.
+      ENDIF.
+    ENDIF.
+
+    IF requested_authorizations-%delete EQ if_abap_behv=>mk-on.
+      IF is_manager = abap_true.
+        result-%delete = if_abap_behv=>auth-allowed.      " หัวหน้า -> ลบได้
+      ELSE.
+        result-%delete = if_abap_behv=>auth-unauthorized. " พนักงาน -> ห้ามลบ
+      ENDIF.
+    ENDIF.
+
+    IF requested_authorizations-%action-acceptTravel EQ if_abap_behv=>mk-on.
+      IF is_manager = abap_true.
+        " หัวหน้า: กดอนุมัติได้
+        result-%action-acceptTravel = if_abap_behv=>auth-allowed.
+      ELSE.
+        " พนักงาน: ห้ามกดอนุมัติ
+        result-%action-acceptTravel = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+    ENDIF.
+
+
+    IF requested_authorizations-%action-rejectTravel EQ if_abap_behv=>mk-on.
+      IF is_manager = abap_true.
+        " หัวหน้า: กดปัตเสทได้
+        result-%action-rejectTravel = if_abap_behv=>auth-allowed.
+      ELSE.
+        " พนักงาน: กดปัตเสทไม่ได้
+        result-%action-rejectTravel = if_abap_behv=>auth-unauthorized.
+      ENDIF.
+
+    ENDIF.
+
+  ENDMETHOD.
+
+  METHOD earlynumbering_create.
+
+    DATA:
+      entity           TYPE STRUCTURE FOR CREATE ZRAP100_R_TravelTP_TRV,
+      travel_id_max    TYPE /dmo/travel_id,
+      " change to abap_false if you get the ABAP Runtime error 'BEHAVIOR_ILLEGAL_STATEMENT'
+      use_number_range TYPE abap_bool VALUE abap_false.
+
+    "Ensure Travel ID is not set yet (idempotent)- must be checked when BO is draft-enabled
+    LOOP AT entities INTO entity WHERE TravelID IS NOT INITIAL.
+      APPEND CORRESPONDING #( entity ) TO mapped-travel.
+    ENDLOOP.
+
+    DATA(entities_wo_travelid) = entities.
+    "Remove the entries with an existing Travel ID
+    DELETE entities_wo_travelid WHERE TravelID IS NOT INITIAL.
+
+    IF use_number_range = abap_true.
+      "Get numbers
+      TRY.
+          cl_numberrange_runtime=>number_get(
+            EXPORTING
+              nr_range_nr       = '01'
+              object            = '/DMO/TRV_M'
+              quantity          = CONV #( lines( entities_wo_travelid ) )
+            IMPORTING
+              number            = DATA(number_range_key)
+              returncode        = DATA(number_range_return_code)
+              returned_quantity = DATA(number_range_returned_quantity)
+          ).
+        CATCH cx_number_ranges INTO DATA(lx_number_ranges).
+          LOOP AT entities_wo_travelid INTO entity.
+            APPEND VALUE #(  %cid      = entity-%cid
+                             %key      = entity-%key
+                             %is_draft = entity-%is_draft
+                             %msg      = lx_number_ranges
+                          ) TO reported-travel.
+            APPEND VALUE #(  %cid      = entity-%cid
+                             %key      = entity-%key
+                             %is_draft = entity-%is_draft
+                          ) TO failed-travel.
+          ENDLOOP.
+          EXIT.
+      ENDTRY.
+
+      "determine the first free travel ID from the number range
+      travel_id_max = number_range_key - number_range_returned_quantity.
+    ELSE.
+      "determine the first free travel ID without number range
+      "Get max travel ID from active table
+      SELECT SINGLE FROM zrap100_atravTRV FIELDS MAX( travel_id ) AS travelID INTO @travel_id_max.
+      "Get max travel ID from draft table
+      SELECT SINGLE FROM zrap100_dtravTRV FIELDS MAX( travelid ) INTO @DATA(max_travelid_draft).
+      IF max_travelid_draft > travel_id_max.
+        travel_id_max = max_travelid_draft.
+      ENDIF.
+    ENDIF.
+
+    "Set Travel ID for new instances w/o ID
+    LOOP AT entities_wo_travelid INTO entity.
+      travel_id_max += 1.
+      entity-TravelID = travel_id_max.
+
+      APPEND VALUE #( %cid      = entity-%cid
+                      %key      = entity-%key
+                      %is_draft = entity-%is_draft
+                    ) TO mapped-travel.
+    ENDLOOP.
+
+
+  ENDMETHOD.
+
+  METHOD setStatusToOpen.
+
+    "Read travel instances of the transferred keys
+    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+     ENTITY Travel
+       FIELDS ( OverallStatus )
+       WITH CORRESPONDING #( keys )
+     RESULT DATA(travels)
+     FAILED DATA(read_failed).
+
+    "If overall travel status is already set, do nothing, i.e. remove such instances
+    DELETE travels WHERE OverallStatus IS NOT INITIAL.
+    CHECK travels IS NOT INITIAL.
+
+    "else set overall travel status to open ('O')
+    MODIFY ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+      ENTITY Travel
+        UPDATE SET FIELDS
+        WITH VALUE #( FOR travel IN travels ( %tky    = travel-%tky
+                                              OverallStatus = travel_status-Open ) )
+    REPORTED DATA(update_reported).
+
+    "Set the changing parameter
+    reported = CORRESPONDING #( DEEP update_reported ).
+
+  ENDMETHOD.
+
+**********************************************************************
+* Validation: Check the validity of the entered customer data
+**********************************************************************
+  METHOD validateCustomer.
+    "read relevant travel instance data
+    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+    ENTITY Travel
+     FIELDS ( CustomerID )
+     WITH CORRESPONDING #( keys )
+    RESULT DATA(travels).
+
+    DATA customers TYPE SORTED TABLE OF /dmo/customer WITH UNIQUE KEY customer_id.
+
+    "optimization of DB select: extract distinct non-initial customer IDs
+    customers = CORRESPONDING #( travels DISCARDING DUPLICATES MAPPING customer_id = customerID EXCEPT * ).
+    DELETE customers WHERE customer_id IS INITIAL.
+    IF customers IS NOT INITIAL.
+
+      "check if customer ID exists
+      SELECT FROM /dmo/customer FIELDS customer_id
+                                FOR ALL ENTRIES IN @customers
+                                WHERE customer_id = @customers-customer_id
+        INTO TABLE @DATA(valid_customers).
+    ENDIF.
+
+    "raise msg for non existing and initial customer id
+    LOOP AT travels INTO DATA(travel).
+
+      APPEND VALUE #(  %tky                 = travel-%tky
+                       %state_area          = 'VALIDATE_CUSTOMER'
+                     ) TO reported-travel.
+
+      IF travel-CustomerID IS  INITIAL.
+        APPEND VALUE #( %tky = travel-%tky ) TO failed-travel.
+
+        APPEND VALUE #( %tky                = travel-%tky
+                        %state_area         = 'VALIDATE_CUSTOMER'
+                        %msg                = NEW /dmo/cm_flight_messages(
+                                                                textid   = /dmo/cm_flight_messages=>enter_customer_id
+                                                                severity = if_abap_behv_message=>severity-error )
+                        %element-CustomerID = if_abap_behv=>mk-on
+                      ) TO reported-travel.
+
+      ELSEIF travel-CustomerID IS NOT INITIAL AND NOT line_exists( valid_customers[ customer_id = travel-CustomerID ] ).
+        APPEND VALUE #(  %tky = travel-%tky ) TO failed-travel.
+
+        APPEND VALUE #(  %tky                = travel-%tky
+                         %state_area         = 'VALIDATE_CUSTOMER'
+                         %msg                = NEW /dmo/cm_flight_messages(
+                                                                customer_id = travel-customerid
+                                                                textid      = /dmo/cm_flight_messages=>customer_unkown
+                                                                severity    = if_abap_behv_message=>severity-error )
+                         %element-CustomerID = if_abap_behv=>mk-on
+                      ) TO reported-travel.
+      ENDIF.
+
+    ENDLOOP.
+  ENDMETHOD.
+
+* Validation: Check the validity of begin and end dates
+
+  METHOD validateDates.
+
+    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+        ENTITY Travel
+          FIELDS (  BeginDate EndDate TravelID )
+          WITH CORRESPONDING #( keys )
+        RESULT DATA(travels).
+
+    LOOP AT travels INTO DATA(travel).
+
+      APPEND VALUE #(  %tky               = travel-%tky
+                       %state_area        = 'VALIDATE_DATES' ) TO reported-travel.
+
+      IF travel-BeginDate IS INITIAL.
+        APPEND VALUE #( %tky = travel-%tky ) TO failed-travel.
+        APPEND VALUE #( %tky               = travel-%tky
+                        %state_area        = 'VALIDATE_DATES'
+                         %msg              = NEW /dmo/cm_flight_messages(
+                                                                textid   = /dmo/cm_flight_messages=>enter_begin_date
+                                                                severity = if_abap_behv_message=>severity-error )
+                      %element-BeginDate = if_abap_behv=>mk-on ) TO reported-travel.
+      ENDIF.
+      IF travel-BeginDate < cl_abap_context_info=>get_system_date( ) AND travel-BeginDate IS NOT INITIAL.
+        APPEND VALUE #( %tky               = travel-%tky ) TO failed-travel.
+
+        APPEND VALUE #( %tky               = travel-%tky
+                        %state_area        = 'VALIDATE_DATES'
+                         %msg              = NEW /dmo/cm_flight_messages(
+                                                                begin_date = travel-BeginDate
+                                                                textid     = /dmo/cm_flight_messages=>begin_date_on_or_bef_sysdate
+                                                                severity   = if_abap_behv_message=>severity-error )
+                        %element-BeginDate = if_abap_behv=>mk-on ) TO reported-travel.
+      ENDIF.
+      IF travel-EndDate IS INITIAL.
+        APPEND VALUE #( %tky = travel-%tky ) TO failed-travel.
+
+        APPEND VALUE #( %tky               = travel-%tky
+                        %state_area        = 'VALIDATE_DATES'
+                         %msg                = NEW /dmo/cm_flight_messages(
+                                                                textid   = /dmo/cm_flight_messages=>enter_end_date
+                                                               severity = if_abap_behv_message=>severity-error )
+                        %element-EndDate   = if_abap_behv=>mk-on ) TO reported-travel.
+      ENDIF.
+      IF travel-EndDate < travel-BeginDate AND travel-BeginDate IS NOT INITIAL
+                                           AND travel-EndDate IS NOT INITIAL.
+        APPEND VALUE #( %tky = travel-%tky ) TO failed-travel.
+
+        APPEND VALUE #( %tky               = travel-%tky
+                        %state_area        = 'VALIDATE_DATES'
+                        %msg               = NEW /dmo/cm_flight_messages(
+                                                                textid     = /dmo/cm_flight_messages=>begin_date_bef_end_date
+                                                                begin_date = travel-BeginDate
+                                                                end_date   = travel-EndDate
+                                                                severity   = if_abap_behv_message=>severity-error )
+                        %element-BeginDate = if_abap_behv=>mk-on
+                        %element-EndDate   = if_abap_behv=>mk-on ) TO reported-travel.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+**************************************************************************
+* Instance-bound non-factory action with parameter `deductDiscount`:
+* Deduct the specified discount from the booking fee (BookingFee)
+**************************************************************************
+*  METHOD deductDiscount.
+*    DATA travels_for_update TYPE TABLE FOR UPDATE ZRAP100_R_TravelTP_TRV.
+*    DATA(keys_with_valid_discount) = keys.
+*
+*    " check and handle invalid discount values
+*    LOOP AT keys_with_valid_discount ASSIGNING FIELD-SYMBOL(<key_with_valid_discount>)
+*      WHERE %param-discount_percent IS INITIAL OR %param-discount_percent > 100 OR %param-discount_percent <= 0.
+*
+*      " report invalid discount value appropriately
+*      APPEND VALUE #( %tky                       = <key_with_valid_discount>-%tky ) TO failed-travel.
+*
+*      APPEND VALUE #( %tky                       = <key_with_valid_discount>-%tky
+*                      %msg                       = NEW /dmo/cm_flight_messages(
+*                                                        textid = /dmo/cm_flight_messages=>discount_invalid
+*                                                        severity = if_abap_behv_message=>severity-error )
+*                      %element-TotalPrice        = if_abap_behv=>mk-on
+*                      %op-%action-deductDiscount = if_abap_behv=>mk-on
+*                    ) TO reported-travel.
+*
+*      " remove invalid discount value
+*      DELETE keys_with_valid_discount.
+*    ENDLOOP.
+*
+*    " check and go ahead with valid discount values
+*    CHECK keys_with_valid_discount IS NOT INITIAL.
+*
+*    " read relevant travel instance data (only booking fee)
+*    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*      ENTITY Travel
+*        FIELDS ( BookingFee )
+*        WITH CORRESPONDING #( keys_with_valid_discount )
+*      RESULT DATA(travels).
+*
+*    LOOP AT travels ASSIGNING FIELD-SYMBOL(<travel>).
+*      DATA percentage TYPE decfloat16.
+*      DATA(discount_percent) = keys_with_valid_discount[ KEY draft %tky = <travel>-%tky ]-%param-discount_percent.
+*      percentage =  discount_percent / 100 .
+*      DATA(reduced_fee) = <travel>-BookingFee * ( 1 - percentage ) .
+*
+*      APPEND VALUE #( %tky       = <travel>-%tky
+*                      BookingFee = reduced_fee
+*                    ) TO travels_for_update.
+*    ENDLOOP.
+*
+*    " update data with reduced fee
+*    MODIFY ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*      ENTITY Travel
+*        UPDATE FIELDS ( BookingFee )
+*        WITH travels_for_update.
+*
+*    " read changed data for action result
+*    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*      ENTITY Travel
+*        ALL FIELDS WITH
+*        CORRESPONDING #( travels )
+*      RESULT DATA(travels_with_discount).
+*
+*    " set action result
+*    result = VALUE #( FOR travel IN travels_with_discount ( %tky   = travel-%tky
+*                                                            %param = travel ) ).
+*  ENDMETHOD.
+
+  METHOD deductDiscount.
+    DATA travels_for_update TYPE TABLE FOR UPDATE zrap100_r_traveltp_trv.
+
+    " 1. อ่านข้อมูลรายการที่ถูกเลือก (keys) มา
+    READ ENTITIES OF zrap100_r_traveltp_trv IN LOCAL MODE
+        ENTITY Travel
+        FIELDS ( TotalPrice  )
+        WITH CORRESPONDING #( keys )
+        RESULT DATA(travels).
+
+    LOOP AT travels ASSIGNING FIELD-SYMBOL(<travel>).
+
+      " 2. รับค่า % ที่ User กรอกมาจาก Popup (อยู่ในตัวแปร keys-parameter)
+      " หา key ที่ตรงกันก่อน (เพราะ User อาจกดพร้อมกันหลายใบ)
+      DATA(discount_percent) = keys[ KEY entity %tky = <travel>-%tky ]-%param-discount_percent.
+
+      IF discount_percent > 0.
+        " 3. คำนวณลดราคา
+        DATA(reduced_amount) = <travel>-TotalPrice * ( 1 - ( discount_percent / 100 ) ).
+
+        " 4. เตรียมอัปเดตราคาใหม่ และเขียนบอกใน Description
+        APPEND VALUE #( %tky = <travel>-%tky
+                        TotalPrice = reduced_amount
+                      ) TO travels_for_update.
+      ENDIF.
+    ENDLOOP.
+
+    " 5. บันทึกข้อมูล
+    MODIFY ENTITIES OF zrap100_r_traveltp_trv IN LOCAL MODE
+        ENTITY Travel
+        UPDATE FIELDS ( TotalPrice  )
+        WITH travels_for_update.
+
+    " 6. ส่งผลลัพธ์กลับหน้าจอ
+    READ ENTITIES OF zrap100_r_traveltp_trv IN LOCAL MODE
+        ENTITY Travel
+        ALL FIELDS WITH CORRESPONDING #( travels )
+        RESULT DATA(travels_result).
+
+    result = VALUE #( FOR travel IN travels_result ( %tky = travel-%tky %param = travel ) ).
+  ENDMETHOD.
+
+
+*  METHOD vat.
+*    " 1. อ่านข้อมูล BookingFee มาเป็นฐาน
+*    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*        ENTITY Travel
+*        FIELDS ( BookingFee Description )
+*        WITH CORRESPONDING #( keys )
+*        RESULT DATA(travels).
+*
+*    DATA travels_for_update TYPE TABLE FOR UPDATE ZRAP100_R_TravelTP_TRV.
+*
+*    LOOP AT travels ASSIGNING FIELD-SYMBOL(<travel>).
+*
+*      " --- สูตรคำนวณ (Math Logic) ---
+*      " เอา BookingFee มาคูณ 1.07 (คือบวก 7%)
+*      " สมมติ BookingFee = 100 -> คำนวณได้ 107
+*      " กดครั้งที่ 2: BookingFee ยังเป็น 100 -> คำนวณได้ 107 เท่าเดิม (แก้ปัญหาบวกซ้ำ)
+*      DATA(amount_with_vat) = <travel>-BookingFee * ( 1 + '0.07' ) .
+*
+*      " --- จุดสำคัญที่แก้ไข ---
+*      " ส่งค่าไปอัปเดตที่ TotalPrice แทน (ห้ามไปทับ BookingFee เดิม)
+*      APPEND VALUE #( %tky        = <travel>-%tky
+*                      TotalPrice  = amount_with_vat       " <-- เปลี่ยนตรงนี้เป็น TotalPrice
+*                    ) TO travels_for_update.
+*    ENDLOOP.
+*
+*    " 2. สั่งอัปเดตลง TotalPrice และ Description
+*    MODIFY ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*        ENTITY Travel
+*        UPDATE FIELDS ( TotalPrice Description )          " <-- เปลี่ยนตรงนี้ด้วย
+*        WITH travels_for_update.
+*
+*    " 3. อ่านค่าที่เปลี่ยนแล้ว ส่งกลับไปให้หน้าจอ
+*    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+*        ENTITY Travel
+*        ALL FIELDS WITH
+*        CORRESPONDING #( travels )
+*        RESULT DATA(travels_with_vat).
+*
+*    result = VALUE #( FOR travel IN travels_with_vat ( %tky   = travel-%tky
+*                                                       %param = travel ) ).
+*
+*  ENDMETHOD.
+
+**************************************************************************
+* Instance-bound factory action `copyTravel`:
+* Copy an existing travel instance
+**************************************************************************
+  METHOD copyTravel.
+    DATA:
+       travels       TYPE TABLE FOR CREATE zrap100_r_traveltp_TRV\\travel.
+
+    " remove travel instances with initial %cid (i.e., not set by caller API)
+    READ TABLE keys WITH KEY %cid = '' INTO DATA(key_with_inital_cid).
+    ASSERT key_with_inital_cid IS INITIAL.
+
+    " read the data from the travel instances to be copied
+    READ ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY travel
+       ALL FIELDS WITH CORRESPONDING #( keys )
+    RESULT DATA(travel_read_result)
+    FAILED failed.
+
+    LOOP AT travel_read_result ASSIGNING FIELD-SYMBOL(<travel>).
+      " fill in travel container for creating new travel instance
+      APPEND VALUE #( %cid      = keys[ KEY entity %key = <travel>-%key ]-%cid
+                     %is_draft = keys[ KEY entity %key = <travel>-%key ]-%param-%is_draft
+                     %data     = CORRESPONDING #( <travel> EXCEPT TravelID )
+                  )
+      TO travels ASSIGNING FIELD-SYMBOL(<new_travel>).
+
+      " adjust the copied travel instance data
+      "" BeginDate must be on or after system date
+      <new_travel>-BeginDate     = cl_abap_context_info=>get_system_date( ).
+      "" EndDate must be after BeginDate
+      <new_travel>-EndDate       = cl_abap_context_info=>get_system_date( ) + 30.
+      "" OverallStatus of new instances must be set to open ('O')
+      <new_travel>-OverallStatus = travel_status-open.
+    ENDLOOP.
+
+    " create new BO instance
+    MODIFY ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY travel
+       CREATE FIELDS ( AgencyID CustomerID BeginDate EndDate BookingFee
+                         TotalPrice CurrencyCode OverallStatus Description )
+          WITH travels
+       MAPPED DATA(mapped_create).
+
+    " set the new BO instances
+    mapped-travel   =  mapped_create-travel .
+  ENDMETHOD.
+
+*************************************************************************************
+* Instance-bound non-factory action: Set the overall travel status to 'A' (accepted)
+*************************************************************************************
+  METHOD acceptTravel.
+    " modify travel instance
+    MODIFY ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY Travel
+       UPDATE FIELDS ( OverallStatus )
+       WITH VALUE #( FOR key IN keys ( %tky          = key-%tky
+                                        OverallStatus = travel_status-Accepted ) )  " 'A'
+    FAILED failed
+    REPORTED reported.
+
+    " read changed data for action result
+    READ ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY Travel
+       ALL FIELDS WITH
+       CORRESPONDING #( keys )
+       RESULT DATA(travels).
+
+    " set the action result parameter
+    result = VALUE #( FOR travel IN travels ( %tky   = travel-%tky
+                                             %param = travel ) ).
+  ENDMETHOD.
+
+************************************************************************************
+* Instance-bound non-factory action: Set the overall travel status to 'X' (rejected)
+*************************************************************************************
+  METHOD rejectTravel.
+    " modify travel instance(s)
+    MODIFY ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY Travel
+       UPDATE FIELDS ( OverallStatus )
+       WITH VALUE #( FOR key IN keys ( %tky          = key-%tky
+                                        OverallStatus = travel_status-rejected ) )  " 'X'
+    FAILED failed
+    REPORTED reported.
+
+    " read changed data for action result
+    READ ENTITIES OF zrap100_r_traveltp_TRV  IN LOCAL MODE
+       ENTITY Travel
+       ALL FIELDS WITH
+       CORRESPONDING #( keys )
+       RESULT DATA(travels).
+
+    " set the action result parameter
+    result = VALUE #( FOR travel IN travels ( %tky   = travel-%tky
+                                             %param = travel ) ).
+  ENDMETHOD.
+
+**************************************************************************
+* Instance-based dynamic feature control
+**************************************************************************
+  METHOD get_instance_features.
+    " read relevant travel instance data
+    READ ENTITIES OF ZRAP100_R_TravelTP_TRV IN LOCAL MODE
+      ENTITY travel
+        FIELDS ( TravelID OverallStatus )
+        WITH CORRESPONDING #( keys )
+      RESULT DATA(travels)
+      FAILED failed.
+
+    " evaluate the conditions, set the operation state, and set result parameter
+    result = VALUE #( FOR travel IN travels
+                      ( %tky                   = travel-%tky
+
+                        %features-%update      = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                        THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %features-%delete      = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                        THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-Edit           = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                         THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-acceptTravel   = COND #( WHEN travel-OverallStatus = travel_status-accepted
+                                                          THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-rejectTravel   = COND #( WHEN travel-OverallStatus = travel_status-rejected
+                                                          THEN if_abap_behv=>fc-o-disabled ELSE if_abap_behv=>fc-o-enabled   )
+                        %action-deductDiscount = COND #( WHEN travel-OverallStatus = travel_status-open
+                                                          OR travel-OverallStatus = travel_status-rejected
+                                                          THEN if_abap_behv=>fc-o-enabled ELSE if_abap_behv=>fc-o-disabled   )
+**                        %action-vat   = COND #( WHEN travel-OverallStatus = travel_status-open
+**                                                          OR travel-OverallStatus = travel_status-rejected
+*                                                          THEN if_abap_behv=>fc-o-enabled ELSE if_abap_behv=>fc-o-disabled   )
+
+
+                    ) ).
+
+  ENDMETHOD.
+
+  METHOD calculateTotalPrice.
+    " 1. อ่านค่า BookingFee จากหน้าจอมา
+    READ ENTITIES OF zrap100_r_traveltp_trv IN LOCAL MODE
+      ENTITY Travel
+      FIELDS ( BookingFee )
+      WITH CORRESPONDING #( keys )
+      RESULT DATA(travels).
+
+    DATA travels_for_update TYPE TABLE FOR UPDATE zrap100_r_traveltp_trv.
+
+    " 2. วนลูปคำนวณ (Logic เดียวกับปุ่ม VAT เลยครับ แต่ย้ายมาทำตรงนี้)
+    LOOP AT travels INTO DATA(travel).
+
+      " สูตร: TotalPrice = BookingFee + VAT 7%
+      DATA(amount_with_vat) = travel-BookingFee * ( 1 + '0.07' ).
+
+      " เตรียมค่าที่จะอัปเดต
+      APPEND VALUE #( %tky = travel-%tky
+                      TotalPrice = amount_with_vat
+*                      Description = |{ travel-Description } (Auto VAT)| " (ของแถม) เติมคำว่า Auto ให้รู้ว่าระบบคิดให้
+                    ) TO travels_for_update.
+    ENDLOOP.
+
+    " 3. สั่งอัปเดตลงตาราง Draft ทันที
+    MODIFY ENTITIES OF zrap100_r_traveltp_trv IN LOCAL MODE
+      ENTITY Travel
+      UPDATE FIELDS ( TotalPrice Description )
+      WITH travels_for_update.
+
+
+  ENDMETHOD.
+
+METHOD initData.
+    READ ENTITIES OF ZRAP100_R_TRAVELTP_TRV IN LOCAL MODE
+      ENTITY Travel
+      ALL FIELDS WITH CORRESPONDING #( keys )
+      RESULT DATA(travels).
+
+    DATA travels_for_update TYPE TABLE FOR UPDATE ZRAP100_R_TRAVELTP_TRV.
+
+    LOOP AT travels INTO DATA(travel).
+      APPEND VALUE #(
+        %tky = travel-%tky
+        " ใส่วันที่วันนี้ (ซึ่งจะผ่าน Validation ของคุณแน่นอน)
+        BeginDate = cl_abap_context_info=>get_system_date( )
+        EndDate   = cl_abap_context_info=>get_system_date( ) + 7
+        CurrencyCode = 'THB'
+        OverallStatus = 'O'
+      ) TO travels_for_update.
+    ENDLOOP.
+
+    MODIFY ENTITIES OF ZRAP100_R_TRAVELTP_TRV IN LOCAL MODE
+      ENTITY Travel
+      UPDATE FIELDS ( BeginDate EndDate CurrencyCode OverallStatus )
+      WITH travels_for_update.
+  ENDMETHOD.
+
+ENDCLASS.
